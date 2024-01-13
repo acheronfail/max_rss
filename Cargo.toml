@@ -5,5 +5,20 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+default-run = "max_rss"
+
+[[bin]]
+path = "src/bin/print.rs"
+name = "print"
+
+[[bin]]
+path = "src/bin/fork.rs"
+name = "fork"
+
+[[bin]]
+path = "src/bin/double-fork.rs"
+name = "double-fork"
+
 [dependencies]
+anyhow = "1.0.79"
 nix = { version = "0.27.1", features = ["ptrace"] }
