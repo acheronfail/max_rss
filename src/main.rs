@@ -4,7 +4,11 @@ use anyhow::Result;
 use nix::{
     sys::{
         ptrace::{self, Event, Options},
-        wait::{waitpid, WaitPidFlag, WaitStatus}, signal::{raise, Signal::SIGSTOP},
+        signal::{
+            raise,
+            Signal::{SIGSTOP, SIGTRAP},
+        },
+        wait::{waitpid, WaitPidFlag, WaitStatus},
     },
     unistd::{execvp, fork, ForkResult, Pid},
 };
@@ -16,7 +20,6 @@ fn get_rss(proc: &Proc) -> Result<u64> {
 
     let path = format!("/proc/{}/smaps_rollup", proc.pid);
     let smaps_rollup = fs::read_to_string(path)?;
-    eprintln!("{}", smaps_rollup);
     let line = smaps_rollup
         .lines()
         .find(|x| x.starts_with("Rss:"))
@@ -140,8 +143,15 @@ fn main() -> Result<()> {
 
                             ptrace::cont(pid, None)?;
                         }
-                        WaitStatus::Stopped(pid, _) => {
-                            ptrace::cont(pid, None)?;
+                        WaitStatus::Stopped(pid, signal) => {
+                            ptrace::cont(
+                                pid,
+                                if signal == SIGTRAP {
+                                    None
+                                } else {
+                                    Some(signal)
+                                },
+                            )?;
                         }
                         WaitStatus::StillAlive => {
                             thread::sleep(Duration::from_micros(100));
