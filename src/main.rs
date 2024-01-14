@@ -4,14 +4,19 @@ use anyhow::Result;
 use nix::{
     sys::{
         ptrace::{self, Event, Options},
-        wait::{waitpid, WaitPidFlag, WaitStatus},
+        wait::{waitpid, WaitPidFlag, WaitStatus}, signal::{raise, Signal::SIGSTOP},
     },
     unistd::{execvp, fork, ForkResult, Pid},
 };
+use serde_json::json;
 
-fn get_rss(pid: Pid) -> Result<u64> {
-    let path = format!("/proc/{}/smaps_rollup", pid);
+fn get_rss(proc: &Proc) -> Result<u64> {
+    #[cfg(debug_assertions)]
+    eprintln!("rrr {}", proc.pid);
+
+    let path = format!("/proc/{}/smaps_rollup", proc.pid);
     let smaps_rollup = fs::read_to_string(path)?;
+    eprintln!("{}", smaps_rollup);
     let line = smaps_rollup
         .lines()
         .find(|x| x.starts_with("Rss:"))
@@ -25,22 +30,43 @@ fn get_rss(pid: Pid) -> Result<u64> {
     Ok(kb * 1024)
 }
 
+#[derive(Clone)]
+struct Proc {
+    pid: Pid,
+    should_read: bool,
+}
+
+impl Proc {
+    pub fn new(pid: Pid, should_read: bool) -> Proc {
+        Proc { pid, should_read }
+    }
+
+    pub fn set_should_read(&mut self, state: bool) {
+        self.should_read = state;
+    }
+}
+
 fn main() -> Result<()> {
-    let bin = env::args().nth(1).expect("please pass bin name");
     match unsafe { fork() } {
         Ok(ForkResult::Child) => {
-            let argv: Vec<CString> = [format!("./target/debug/{bin}")]
-                .into_iter()
+            let argv: Vec<CString> = env::args()
+                .skip(1)
                 .map(|s| CString::new(s).unwrap())
                 .collect();
 
             ptrace::traceme()?;
+            raise(SIGSTOP)?;
+
             execvp(&argv[0], &argv).expect_err("failed to execvp");
 
             Ok(())
         }
         Ok(ForkResult::Parent { child }) => {
-            println!("::: pid of tracee: {:?}", child);
+            #[cfg(debug_assertions)]
+            {
+                println!("::: pid of tracer: {:?}", nix::unistd::getpid());
+                println!("::: pid of tracee: {:?}", child);
+            }
 
             let options = Options::PTRACE_O_TRACEEXIT
                 | Options::PTRACE_O_TRACEFORK
@@ -53,26 +79,27 @@ fn main() -> Result<()> {
             ptrace::cont(child, None)?;
 
             // list of tracee pids
-            let mut pids = vec![child];
+            let mut proc_count = 1;
+            let mut read_count = 0;
+            let mut procs = vec![Proc::new(child, true)];
             let mut rss = 0;
             loop {
-                if pids.is_empty() {
+                if procs.is_empty() {
                     break;
                 }
 
-                for i in 0..pids.len() {
-                    let status = waitpid(pids[i], Some(WaitPidFlag::WNOHANG))?;
+                for i in 0..procs.len() {
+                    let status = waitpid(procs[i].pid, Some(WaitPidFlag::WNOHANG))?;
 
+                    #[cfg(debug_assertions)]
                     if !matches!(status, WaitStatus::StillAlive) {
-                        eprintln!("::: {} {:?}", &pids[i], &status);
+                        eprintln!("::: {} {:?}", &procs[i].pid, &status);
                     }
 
                     match status {
-                        WaitStatus::Exited(pid, code) => {
-                            println!("::: tracee {} exited with {}", pid, code);
-
+                        WaitStatus::Exited(pid, _) => {
                             // stop tracking this pid since the process will exit
-                            pids.retain(|p| *p != pid);
+                            procs.retain(|p| p.pid != pid);
 
                             // break here since we're iterating `pids` and we just changed its length
                             break;
@@ -81,7 +108,13 @@ fn main() -> Result<()> {
                             // this event fires early during process exit, so it's at this time we
                             // read the Rss value of the process just before it's gone
                             if value == Event::PTRACE_EVENT_EXIT as i32 {
-                                rss += get_rss(pid)?;
+                                let proc =
+                                    procs.iter().find(|p| p.pid == pid).expect("untracked pid");
+
+                                if proc.should_read {
+                                    rss += get_rss(&proc)?;
+                                    read_count += 1;
+                                }
                             }
 
                             // since we've set PTRACE_O_TRACE* options, all children will automatically
@@ -95,8 +128,15 @@ fn main() -> Result<()> {
                             if NEW_CHILD_EVENTS.contains(&value) {
                                 let new_pid = ptrace::getevent(pid)?;
                                 let new_pid = Pid::from_raw(new_pid as i32);
-                                pids.push(new_pid);
+                                procs.push(Proc::new(new_pid, false));
+                                proc_count += 1;
                             }
+
+                            procs
+                                .iter_mut()
+                                .find(|p| p.pid == pid)
+                                .unwrap()
+                                .set_should_read(true);
 
                             ptrace::cont(pid, None)?;
                         }
@@ -107,13 +147,23 @@ fn main() -> Result<()> {
                             thread::sleep(Duration::from_micros(100));
                         }
                         _ => {
-                            ptrace::cont(pids[i], None)?;
+                            ptrace::cont(procs[i].pid, None)?;
                         }
                     }
                 }
             }
 
-            println!("max_rss: {}", rss);
+            fs::write(
+                "max_rss.json",
+                format!(
+                    "{}",
+                    json!({
+                        "max_rss": rss,
+                        "total_pids": proc_count,
+                        "total_reads": read_count
+                    })
+                ),
+            )?;
 
             Ok(())
         }
