@@ -100,7 +100,7 @@ fn main() -> Result<()> {
                     }
 
                     match status {
-                        WaitStatus::Exited(pid, _) => {
+                        WaitStatus::Exited(pid, _) | WaitStatus::Signaled(pid, _, _) => {
                             // stop tracking this pid since the process will exit
                             procs.retain(|p| p.pid != pid);
 
