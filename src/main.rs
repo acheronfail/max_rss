@@ -137,7 +137,7 @@ fn main() -> Result<()> {
                             break;
                         }
                         WaitStatus::Signaled(pid, signal, _) => {
-                            // stop tracking this pid since the process will exit
+                            // stop tracking this pid since the process exited
                             procs.retain(|p| p.pid != pid);
 
                             if args.return_result && pid == child {
@@ -201,11 +201,12 @@ fn main() -> Result<()> {
                             )?;
                         }
                         WaitStatus::StillAlive => {
-                            // we checked to see if any of our traced processes was stopped, but they
-                            // weren't so continue through and keep checking
+                            // this pid is still running (has not been stopped) so just continue
+                            // checking other pids
                             continue;
                         }
                         _ => {
+                            // any other event we don't currently handle
                             ptrace::cont(procs[i].pid, None)?;
                         }
                     }
