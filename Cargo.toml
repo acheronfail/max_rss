@@ -1,26 +1,18 @@
 [package]
 name = "max_rss"
 version = "0.1.0"
+description = "A small utility to measure resident set size (rss) of a process"
+homepage = "https://github.com/acheronfail/max_rss"
+repository = "https://github.com/acheronfail/max_rss"
+keywords = ["max_rss", "measurement", "memory", "rss", "resident"]
+categories = ["command-line-utilities"]
+authors = ["acheronfail <acheronfail@gmail.com>"]
+license = "GPL-3.0-only"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-default-run = "max_rss"
-
-[[bin]]
-path = "src/bin/print.rs"
-name = "print"
-
-[[bin]]
-path = "src/bin/fork.rs"
-name = "fork"
-
-[[bin]]
-path = "src/bin/double-fork.rs"
-name = "double-fork"
 
 [dependencies]
 anyhow = "1.0.79"
+lexopt = "0.3.0"
 nix = { version = "0.27.1", features = ["ptrace", "signal"] }
-serde = { version = "1.0.195" }
+serde = "1.0.195"
 serde_json = "1.0.111"

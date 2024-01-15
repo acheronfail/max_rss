@@ -1,20 +1,20 @@
-use std::{env, ffi::CString, fs, thread, time::Duration};
+mod cli;
+
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::time::Duration;
+use std::{fs, process, thread};
 
 use anyhow::Result;
-use nix::{
-    sys::{
-        ptrace::{self, Event, Options},
-        signal::{
-            raise,
-            Signal::{SIGSTOP, SIGTRAP},
-        },
-        wait::{waitpid, WaitPidFlag, WaitStatus},
-    },
-    unistd::{execvp, fork, ForkResult, Pid},
-};
+use cli::Args;
+use nix::sys::ptrace::{self, Event, Options};
+use nix::sys::signal::raise;
+use nix::sys::signal::Signal::{SIGSTOP, SIGTRAP};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::{execvp, fork, ForkResult, Pid};
 use serde_json::json;
 
-fn get_rss(proc: &Proc) -> Result<u64> {
+fn get_rss(proc: &Tracee) -> Result<u64> {
     #[cfg(debug_assertions)]
     eprintln!("rrr {}", proc.pid);
 
@@ -34,14 +34,16 @@ fn get_rss(proc: &Proc) -> Result<u64> {
 }
 
 #[derive(Clone)]
-struct Proc {
+struct Tracee {
+    /// PID of the process being traced
     pid: Pid,
+    /// Whether we should count the RSS of this process towards our final sum
     should_read: bool,
 }
 
-impl Proc {
-    pub fn new(pid: Pid, should_read: bool) -> Proc {
-        Proc { pid, should_read }
+impl Tracee {
+    pub fn new(pid: Pid, should_read: bool) -> Tracee {
+        Tracee { pid, should_read }
     }
 
     pub fn set_should_read(&mut self, state: bool) {
@@ -50,20 +52,31 @@ impl Proc {
 }
 
 fn main() -> Result<()> {
-    match unsafe { fork() } {
-        Ok(ForkResult::Child) => {
-            let argv: Vec<CString> = env::args()
-                .skip(1)
-                .map(|s| CString::new(s).unwrap())
-                .collect();
+    let args = Args::parse()?;
 
+    match unsafe { fork() } {
+        // tracee
+        Ok(ForkResult::Child) => {
+            let argv = args
+                .command
+                .into_iter()
+                .map(|s| CString::new(s.as_bytes()).unwrap())
+                .collect::<Vec<CString>>();
+
+            // become a tracee for the parent process
             ptrace::traceme()?;
+
+            // immediately stop ourselves, so when the parent becomes our tracer
+            // execution begins from here
             raise(SIGSTOP)?;
 
+            // start the program to be traced
             execvp(&argv[0], &argv).expect_err("failed to execvp");
 
             Ok(())
         }
+
+        // tracer
         Ok(ForkResult::Parent { child }) => {
             #[cfg(debug_assertions)]
             {
@@ -71,27 +84,39 @@ fn main() -> Result<()> {
                 println!("::: pid of tracee: {:?}", child);
             }
 
-            let options = Options::PTRACE_O_TRACEEXIT
-                | Options::PTRACE_O_TRACEFORK
-                | Options::PTRACE_O_TRACEVFORK
-                | Options::PTRACE_O_TRACECLONE;
-
-            // NOTE: child should be stopped after `ptrace::traceme()`, on its first instruction
+            // the child began by SIGSTOP'ing itself so we can attach to it now
             let _ = waitpid(child, None)?;
-            ptrace::setoptions(child, options)?;
+            // set our tracer options so we can intercept events of interest
+            ptrace::setoptions(
+                child,
+                Options::PTRACE_O_TRACEEXIT
+                    | Options::PTRACE_O_TRACEFORK
+                    | Options::PTRACE_O_TRACEVFORK
+                    | Options::PTRACE_O_TRACECLONE,
+            )?;
+            // now resume the child
             ptrace::cont(child, None)?;
 
-            // list of tracee pids
+            // total observed processes
             let mut proc_count = 1;
+            // total processes we're including in the RSS sum
             let mut read_count = 0;
-            let mut procs = vec![Proc::new(child, true)];
+            // list of all currently known processes
+            let mut procs = vec![Tracee::new(child, true)];
+            // resident set size sum
             let mut rss = 0;
+            // our exit code
+            let mut exit_code = 0;
+
             loop {
+                // no more processes to trace means everyone has exited, so we're done tracing
                 if procs.is_empty() {
                     break;
                 }
 
+                // loop through each of our traced processes, and see if any have been stopped yet
                 for i in 0..procs.len() {
+                    // make sure we pass WNOHANG here so this check is non-blocking
                     let status = waitpid(procs[i].pid, Some(WaitPidFlag::WNOHANG))?;
 
                     #[cfg(debug_assertions)]
@@ -100,9 +125,24 @@ fn main() -> Result<()> {
                     }
 
                     match status {
-                        WaitStatus::Exited(pid, _) | WaitStatus::Signaled(pid, _, _) => {
+                        WaitStatus::Exited(pid, code) => {
+                            // stop tracking this pid since the process exited
+                            procs.retain(|p| p.pid != pid);
+
+                            if args.return_result && pid == child {
+                                exit_code = code;
+                            }
+
+                            // break here since we're iterating `pids` and we just changed its length
+                            break;
+                        }
+                        WaitStatus::Signaled(pid, signal, _) => {
                             // stop tracking this pid since the process will exit
                             procs.retain(|p| p.pid != pid);
+
+                            if args.return_result && pid == child {
+                                exit_code = 128 + signal as i32;
+                            }
 
                             // break here since we're iterating `pids` and we just changed its length
                             break;
@@ -131,10 +171,14 @@ fn main() -> Result<()> {
                             if NEW_CHILD_EVENTS.contains(&value) {
                                 let new_pid = ptrace::getevent(pid)?;
                                 let new_pid = Pid::from_raw(new_pid as i32);
-                                procs.push(Proc::new(new_pid, false));
+                                procs.push(Tracee::new(new_pid, false));
                                 proc_count += 1;
                             }
 
+                            // this process created other processes, so count its rss towards our sum
+                            // this should be accurate enough, since linux uses copy-on-write for new
+                            // processes, even if a process forks 100 times, it won't use any more memory
+                            // (unless of course, a particular thread starts allocating more, etc)
                             procs
                                 .iter_mut()
                                 .find(|p| p.pid == pid)
@@ -146,6 +190,9 @@ fn main() -> Result<()> {
                         WaitStatus::Stopped(pid, signal) => {
                             ptrace::cont(
                                 pid,
+                                // if the signal was SIGTRAP then it was likely sent because of us as
+                                // the tracer, but if it was something else, just send the signal
+                                // through to the process
                                 if signal == SIGTRAP {
                                     None
                                 } else {
@@ -154,17 +201,23 @@ fn main() -> Result<()> {
                             )?;
                         }
                         WaitStatus::StillAlive => {
-                            thread::sleep(Duration::from_micros(100));
+                            // we checked to see if any of our traced processes was stopped, but they
+                            // weren't so continue through and keep checking
+                            continue;
                         }
                         _ => {
                             ptrace::cont(procs[i].pid, None)?;
                         }
                     }
                 }
+
+                // delay a little here so we're not doing an extremely aggressive busy-wait-loop
+                thread::sleep(Duration::from_micros(200));
             }
 
+            // write output file
             fs::write(
-                "max_rss.json",
+                args.output,
                 format!(
                     "{}",
                     json!({
@@ -175,7 +228,7 @@ fn main() -> Result<()> {
                 ),
             )?;
 
-            Ok(())
+            process::exit(exit_code);
         }
         Err(e) => panic!("failed to fork: {}", e),
     }
