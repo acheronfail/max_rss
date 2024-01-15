@@ -1,3 +1,12 @@
+//! Some great references on how to use Linux's ptrace API:
+//! - https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1/
+//! - https://eli.thegreenplace.net/2011/01/27/how-debuggers-work-part-2-breakpoints
+//! - https://eli.thegreenplace.net/2011/02/07/how-debuggers-work-part-3-debugging-information
+//!
+//! And some other good resources for understanding how to read process information:
+//! - https://www.kernel.org/doc/html/latest/filesystems/proc.html?highlight=Pss#id10
+//! - https://github.com/htop-dev/htop
+
 mod cli;
 
 use std::ffi::CString;
