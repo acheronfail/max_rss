@@ -9,6 +9,7 @@
 
 mod cli;
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
@@ -21,43 +22,56 @@ use nix::sys::signal::raise;
 use nix::sys::signal::Signal::{SIGSTOP, SIGTRAP};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{execvp, fork, ForkResult, Pid};
-use serde_json::json;
+use serde_json::{json, Value};
 
-fn get_rss(proc: &Tracee) -> Result<u64> {
+fn get_rss(pid: Pid) -> Result<u64> {
     #[cfg(debug_assertions)]
-    eprintln!("rrr {}", proc.pid);
+    eprintln!("rrr {}", pid);
 
-    let path = format!("/proc/{}/smaps_rollup", proc.pid);
+    let path = format!("/proc/{}/smaps_rollup", pid);
     let smaps_rollup = fs::read_to_string(path)?;
+
+    // extract line starting with "Rss:"
     let line = smaps_rollup
         .lines()
         .find(|x| x.starts_with("Rss:"))
         .expect("failed to find Rss line");
+
+    // extract value: "Rss:      <VALUE> kb"
     let kb_str = line
         .split_ascii_whitespace()
         .nth(1)
         .expect("failed to find rss value");
-    let kb = kb_str.parse::<u64>().expect("failed to parse rss value");
 
+    let kb = kb_str.parse::<u64>().expect("failed to parse rss value");
     Ok(kb * 1024)
 }
 
-#[derive(Clone)]
-struct Tracee {
-    /// PID of the process being traced
-    pid: Pid,
-    /// Whether we should count the RSS of this process towards our final sum
-    should_read: bool,
+#[derive(Debug, Default, Clone)]
+struct ProcInfo {
+    /// Whether this process has exited.
+    exited: bool,
+
+    /// All known children of this process.
+    children: Vec<Pid>,
+
+    /// Measured RSS for this process. Captured at the last moment before process exit.
+    rss: u64,
 }
 
-impl Tracee {
-    pub fn new(pid: Pid, should_read: bool) -> Tracee {
-        Tracee { pid, should_read }
-    }
+fn tree(pid: Pid, table: &HashMap<Pid, ProcInfo>) -> Value {
+    let info = table.get(&pid).expect("untracked pid");
+    let children = info
+        .children
+        .iter()
+        .map(|child| tree(*child, table))
+        .collect::<Vec<_>>();
 
-    pub fn set_should_read(&mut self, state: bool) {
-        self.should_read = state;
-    }
+    json!({
+        "id": pid.as_raw(),
+        "rss": info.rss,
+        "children": (!children.is_empty()).then(|| children)
+    })
 }
 
 fn main() -> Result<()> {
@@ -106,66 +120,58 @@ fn main() -> Result<()> {
             // now resume the child
             ptrace::cont(child, None)?;
 
-            // total observed processes
-            let mut proc_count = 1;
-            // total processes we're including in the RSS sum
-            let mut read_count = 0;
-            // list of all currently known processes
-            let mut procs = vec![Tracee::new(child, true)];
-            // resident set size sum
-            let mut rss = 0;
             // our exit code
             let mut exit_code = 0;
 
+            // list of all currently known processes
+            let mut procs = HashMap::new();
+            procs.insert(child, ProcInfo::default());
+
             loop {
-                // no more processes to trace means everyone has exited, so we're done tracing
-                if procs.is_empty() {
+                // if all our processes have exited, we're done tracing
+                if procs.iter().all(|(_, t)| t.exited) {
                     break;
                 }
 
                 // loop through each of our traced processes, and see if any have been stopped yet
-                for i in 0..procs.len() {
+                let pids_to_check = procs
+                    .iter()
+                    .filter_map(|(p, t)| if t.exited { None } else { Some(*p) })
+                    .collect::<Vec<_>>();
+
+                for current in pids_to_check {
                     // make sure we pass WNOHANG here so this check is non-blocking
-                    let status = waitpid(procs[i].pid, Some(WaitPidFlag::WNOHANG))?;
+                    let status = waitpid(current, Some(WaitPidFlag::WNOHANG))?;
 
                     #[cfg(debug_assertions)]
                     if !matches!(status, WaitStatus::StillAlive) {
-                        eprintln!("::: {} {:?}", &procs[i].pid, &status);
+                        eprintln!("::: {} {:?}", current, &status);
                     }
 
                     match status {
                         WaitStatus::Exited(pid, code) => {
                             // stop tracking this pid since the process exited
-                            procs.retain(|p| p.pid != pid);
+                            procs.entry(pid).and_modify(|i| i.exited = true);
 
                             if args.return_result && pid == child {
                                 exit_code = code;
                             }
-
-                            // break here since we're iterating `pids` and we just changed its length
-                            break;
                         }
                         WaitStatus::Signaled(pid, signal, _) => {
                             // stop tracking this pid since the process exited
-                            procs.retain(|p| p.pid != pid);
+                            procs.entry(pid).and_modify(|i| i.exited = true);
 
                             if args.return_result && pid == child {
                                 exit_code = 128 + signal as i32;
                             }
-
-                            // break here since we're iterating `pids` and we just changed its length
-                            break;
                         }
                         WaitStatus::PtraceEvent(pid, _, value) => {
                             // this event fires early during process exit, so it's at this time we
                             // read the Rss value of the process just before it's gone
                             if value == Event::PTRACE_EVENT_EXIT as i32 {
-                                let proc =
-                                    procs.iter().find(|p| p.pid == pid).expect("untracked pid");
-
-                                if proc.should_read {
-                                    rss += get_rss(&proc)?;
-                                    read_count += 1;
+                                match procs.get_mut(&pid) {
+                                    Some(i) => i.rss = get_rss(pid)?,
+                                    None => unreachable!("untracked pid"),
                                 }
                             }
 
@@ -180,19 +186,9 @@ fn main() -> Result<()> {
                             if NEW_CHILD_EVENTS.contains(&value) {
                                 let new_pid = ptrace::getevent(pid)?;
                                 let new_pid = Pid::from_raw(new_pid as i32);
-                                procs.push(Tracee::new(new_pid, false));
-                                proc_count += 1;
+                                procs.insert(new_pid, ProcInfo::default());
+                                procs.entry(pid).and_modify(|i| i.children.push(new_pid));
                             }
-
-                            // this process created other processes, so count its rss towards our sum
-                            // this should be accurate enough, since linux uses copy-on-write for new
-                            // processes, even if a process forks 100 times, it won't use any more memory
-                            // (unless of course, a particular thread starts allocating more, etc)
-                            procs
-                                .iter_mut()
-                                .find(|p| p.pid == pid)
-                                .unwrap()
-                                .set_should_read(true);
 
                             ptrace::cont(pid, None)?;
                         }
@@ -216,7 +212,7 @@ fn main() -> Result<()> {
                         }
                         _ => {
                             // any other event we don't currently handle
-                            ptrace::cont(procs[i].pid, None)?;
+                            ptrace::cont(current, None)?;
                         }
                     }
                 }
@@ -225,15 +221,28 @@ fn main() -> Result<()> {
                 thread::sleep(Duration::from_micros(200));
             }
 
+            let (max_rss, total_reads) = procs.iter().fold((0, 0), |acc, (pid, i)| {
+                // this process created other processes, so count its rss towards our sum
+                // this should be accurate enough, since linux uses copy-on-write for new
+                // processes, even if a process forks 100 times, it won't use any more memory
+                // (unless of course, a particular thread starts allocating more, etc)
+                if *pid == child || !i.children.is_empty() {
+                    (acc.0 + i.rss, acc.1 + 1)
+                } else {
+                    acc
+                }
+            });
+
             // write output file
             fs::write(
                 args.output,
                 format!(
                     "{}",
                     json!({
-                        "max_rss": rss,
-                        "total_pids": proc_count,
-                        "total_reads": read_count
+                        "max_rss": max_rss,
+                        "total_pids": procs.len(),
+                        "total_reads": total_reads,
+                        "graph": tree(child, &procs)
                     })
                 ),
             )?;
