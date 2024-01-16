@@ -40,6 +40,8 @@ OPTIONS:
     -r, --return-result
         If set, and COMMAND exits with a non-zero exit code, then {bin} itself
         will exit with that same exit code and print an error to stderr.
+        If COMMAND exited because of a signal, then the return code will be set
+        to `128 + signal`.
 
         Can be disabled with --no-return-result.
 
