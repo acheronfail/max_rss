@@ -25,9 +25,6 @@ use nix::unistd::{execvp, fork, ForkResult, Pid};
 use serde_json::{json, Value};
 
 fn get_rss(pid: Pid) -> Result<u64> {
-    #[cfg(debug_assertions)]
-    eprintln!("rrr {}", pid);
-
     let path = format!("/proc/{}/smaps_rollup", pid);
     let smaps_rollup = fs::read_to_string(path)?;
 
@@ -35,7 +32,7 @@ fn get_rss(pid: Pid) -> Result<u64> {
     let line = smaps_rollup
         .lines()
         .find(|x| x.starts_with("Rss:"))
-        .expect("failed to find Rss line");
+        .expect("failed to find rss line");
 
     // extract value: "Rss:      <VALUE> kb"
     let kb_str = line
@@ -101,10 +98,9 @@ fn main() -> Result<()> {
 
         // tracer
         Ok(ForkResult::Parent { child }) => {
-            #[cfg(debug_assertions)]
-            {
-                println!("::: pid of tracer: {:?}", nix::unistd::getpid());
-                println!("::: pid of tracee: {:?}", child);
+            if args.debug {
+                eprintln!("::: pid of tracer: {:?}", nix::unistd::getpid());
+                eprintln!("::: pid of tracee: {:?}", child);
             }
 
             // the child began by SIGSTOP'ing itself so we can attach to it now
@@ -143,8 +139,7 @@ fn main() -> Result<()> {
                     // make sure we pass WNOHANG here so this check is non-blocking
                     let status = waitpid(current, Some(WaitPidFlag::WNOHANG))?;
 
-                    #[cfg(debug_assertions)]
-                    if !matches!(status, WaitStatus::StillAlive) {
+                    if args.debug && !matches!(status, WaitStatus::StillAlive) {
                         eprintln!("::: {} {:?}", current, &status);
                     }
 

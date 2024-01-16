@@ -45,6 +45,15 @@ OPTIONS:
 
         Can be disabled with --no-return-result.
 
+    -d, --debug
+        Print debug logs to stderr.
+
+    -v, --version
+        Print version information and exit.
+
+    -h, --help
+        Show this help text.
+
 EXAMPLES:
     Using {bin} should be more or less the same as using something like `time`:
 
@@ -72,15 +81,16 @@ EXAMPLES:
 
 #[derive(Debug)]
 pub struct Args {
+    pub debug: bool,
     pub return_result: bool,
     pub output: PathBuf,
-
     pub command: Vec<OsString>,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Args {
+            debug: false,
             return_result: false,
             output: PathBuf::from(format!("./{}.json", env!("CARGO_BIN_NAME"))),
             command: vec![],
@@ -119,6 +129,11 @@ impl Args {
                 Short('v') | Long("version") => {
                     print_version();
                     process::exit(0);
+                }
+
+                // -d, --debug
+                Short('d') | Long("debug") => {
+                    args.debug = true;
                 }
 
                 // collect the rest of the arguments as the command to run
@@ -199,6 +214,15 @@ mod tests {
             args!("--return-result", "--no-return-result", "foo")?.return_result,
             false
         );
+        Ok(())
+    }
+
+    #[test]
+    fn debug() -> Result<()> {
+        assert_eq!(args!("foo")?.debug, false);
+        assert_eq!(args!("-d", "foo")?.debug, true);
+        assert_eq!(args!("--debug", "foo")?.debug, true);
+
         Ok(())
     }
 }

@@ -4,7 +4,7 @@ _default:
 # run the crate, spawning the specified example program
 run example *flags:
   cargo build --example {{example}}
-  cargo run {{flags}} -- ./target/debug/examples/{{example}}
+  cargo run {{flags}} -- -d -- ./target/debug/examples/{{example}}
   jq . ./max_rss.json
   jq .max_rss ./max_rss.json | numfmt --to iec
 
