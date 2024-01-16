@@ -11,5 +11,8 @@ run example *flags:
 test:
   cargo test
 
+install:
+  cargo install --path .
+
 fmt:
   rustup run nightly cargo fmt
