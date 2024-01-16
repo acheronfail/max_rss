@@ -5,6 +5,8 @@ _default:
 run example *flags:
   cargo build --example {{example}}
   cargo run {{flags}} -- ./target/debug/examples/{{example}}
+  jq . ./max_rss.json
+  jq .max_rss ./max_rss.json | numfmt --to iec
 
 test:
   cargo test
