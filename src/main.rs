@@ -15,8 +15,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
 use std::{fs, process, thread};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use cli::Args;
+use nix::errno::Errno;
 use nix::sys::ptrace::{self, Event, Options};
 use nix::sys::signal::raise;
 use nix::sys::signal::Signal::{SIGSTOP, SIGTRAP};
@@ -116,7 +117,6 @@ fn main() -> Result<()> {
             // now resume the child
             ptrace::cont(child, None)?;
 
-            // our exit code
             let mut exit_code = 0;
 
             // list of all currently known processes
@@ -168,6 +168,23 @@ fn main() -> Result<()> {
                                     Some(i) => i.rss = get_rss(pid)?,
                                     None => unreachable!("untracked pid"),
                                 }
+
+                                match ptrace::cont(pid, None) {
+                                    Ok(()) => {}
+                                    // intentionally ignore ESRCH errors here, because as per `man 2 ptrace`'s section
+                                    // called "Death under ptrace" we cannot assume that the tracee exists at this point
+                                    //
+                                    // reasons why ESRCH may be returned:
+                                    //  1. tracee no longer exists
+                                    //  2. tracee is not ptrace-stopped
+                                    //  3. tracee is not traced by us
+                                    //
+                                    // in our case 2 and 3 should not be possible, so we should be able to safely ignore 1
+                                    Err(e) if e == Errno::ESRCH => {}
+                                    Err(e) => bail!(e),
+                                }
+                                procs.entry(pid).and_modify(|i| i.exited = true);
+                                break;
                             }
 
                             // since we've set PTRACE_O_TRACE* options, all children will automatically
