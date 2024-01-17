@@ -217,10 +217,13 @@ fn main() -> Result<()> {
             }
 
             let (max_rss, total_reads) = procs.iter().fold((0, 0), |acc, (pid, i)| {
-                // this process created other processes, so count its rss towards our sum
-                // this should be accurate enough, since linux uses copy-on-write for new
-                // processes, even if a process forks 100 times, it won't use any more memory
-                // (unless of course, a particular thread starts allocating more, etc)
+                // count the rss towards our total when:
+                //  - the process was the parent `tracee` process we created ourselves
+                //  - the process itself spawned other processes
+                //
+                // because linux uses copy-on-write for new processes, even if a process forks many
+                // times it won't use more memory, unless one of the new children itself allocates
+                // more memory
                 if *pid == child || !i.children.is_empty() {
                     (acc.0 + i.rss, acc.1 + 1)
                 } else {

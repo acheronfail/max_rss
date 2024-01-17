@@ -61,3 +61,10 @@ fn threads() {
     assert_eq!(json["total_pids"], 11);
     assert_eq!(json["total_reads"], 1);
 }
+
+#[test]
+fn fork_threads() {
+    let json = run("fork-threads");
+    assert_eq!(json["total_pids"], 12);
+    assert_eq!(json["total_reads"], 2);
+}
