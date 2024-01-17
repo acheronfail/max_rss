@@ -276,6 +276,7 @@ fn main() -> Result<()> {
                         "max_rss": max_rss,
                         "total_pids": procs.len(),
                         "total_reads": total_reads,
+                        "exit_code": exit_code,
                         "graph": tree(child, &procs)
                     })
                 ),

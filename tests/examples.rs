@@ -82,3 +82,18 @@ fn kill_threads() {
     assert_eq!(json["total_reads"], 1);
 }
 
+#[test]
+fn tracee_exit_0() {
+    let json = run("true");
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(json["total_pids"], 1);
+    assert_eq!(json["total_reads"], 1);
+}
+
+#[test]
+fn tracee_exit_1() {
+    let json = run("true");
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(json["total_pids"], 1);
+    assert_eq!(json["total_reads"], 1);
+}

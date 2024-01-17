@@ -1,8 +1,6 @@
-use std::{
-    process::{Command, Stdio},
-    thread::sleep,
-    time::Duration,
-};
+use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::Duration;
 
 use nix::sys::wait::wait;
 
