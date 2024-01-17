@@ -1,6 +1,6 @@
 [package]
 name = "max_rss"
-version = "0.3.0"
+version = "0.3.1"
 description = "A small utility to measure resident set size (rss) of a process"
 homepage = "https://github.com/acheronfail/max_rss"
 repository = "https://github.com/acheronfail/max_rss"
