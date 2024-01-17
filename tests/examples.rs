@@ -56,7 +56,7 @@ fn fork() {
 
 #[test]
 fn double_fork() {
-    let json = run("double-fork");
+    let json = run("double_fork");
     assert_eq!(json["total_pids"], 4);
     assert_eq!(json["total_reads"], 2);
 }
@@ -70,7 +70,15 @@ fn threads() {
 
 #[test]
 fn fork_threads() {
-    let json = run("fork-threads");
+    let json = run("fork_threads");
     assert_eq!(json["total_pids"], 12);
     assert_eq!(json["total_reads"], 2);
 }
+
+#[test]
+fn kill_threads() {
+    let json = run("kill_threads");
+    assert_eq!(json["total_pids"], 11);
+    assert_eq!(json["total_reads"], 1);
+}
+
