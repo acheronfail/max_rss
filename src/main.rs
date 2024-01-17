@@ -114,6 +114,12 @@ fn main() -> Result<()> {
                     | Options::PTRACE_O_TRACEVFORK
                     | Options::PTRACE_O_TRACECLONE,
             )?;
+            // list of ptrace events that cause a new process to be created
+            const NEW_CHILD_EVENTS: [i32; 3] = [
+                Event::PTRACE_EVENT_FORK as i32,
+                Event::PTRACE_EVENT_VFORK as i32,
+                Event::PTRACE_EVENT_CLONE as i32,
+            ];
             // now resume the child
             ptrace::cont(child, None)?;
 
@@ -132,7 +138,7 @@ fn main() -> Result<()> {
                 // loop through each of our traced processes, and see if any have been stopped yet
                 let pids_to_check = procs
                     .iter()
-                    .filter_map(|(p, t)| if t.exited { None } else { Some(*p) })
+                    .filter_map(|(p, t)| (!t.exited).then_some(*p))
                     .collect::<Vec<_>>();
 
                 for current in pids_to_check {
@@ -160,41 +166,54 @@ fn main() -> Result<()> {
                                 exit_code = 128 + signal as i32;
                             }
                         }
-                        WaitStatus::PtraceEvent(pid, _, value) => {
+                        WaitStatus::PtraceEvent(pid, _, value)
+                            if value == Event::PTRACE_EVENT_EXIT as i32 =>
+                        {
                             // this event fires early during process exit, so it's at this time we
                             // read the Rss value of the process just before it's gone
-                            if value == Event::PTRACE_EVENT_EXIT as i32 {
-                                match procs.get_mut(&pid) {
-                                    Some(i) => i.rss = get_rss(pid)?,
-                                    None => unreachable!("untracked pid"),
-                                }
-
-                                match ptrace::cont(pid, None) {
-                                    Ok(()) => {}
-                                    // intentionally ignore ESRCH errors here, because as per `man 2 ptrace`'s section
-                                    // called "Death under ptrace" we cannot assume that the tracee exists at this point
-                                    //
-                                    // reasons why ESRCH may be returned:
-                                    //  1. tracee no longer exists
-                                    //  2. tracee is not ptrace-stopped
-                                    //  3. tracee is not traced by us
-                                    //
-                                    // in our case 2 and 3 should not be possible, so we should be able to safely ignore 1
-                                    Err(e) if e == Errno::ESRCH => {}
-                                    Err(e) => bail!(e),
-                                }
-                                procs.entry(pid).and_modify(|i| i.exited = true);
-                                break;
+                            match procs.get_mut(&pid) {
+                                Some(i) => i.rss = get_rss(pid)?,
+                                None => unreachable!("untracked pid"),
                             }
 
+                            match if pid == child && args.return_result {
+                                // if we need to return the child's result, then we shouldn't detach from it since
+                                // we'll need its exit event to capture the return value
+                                ptrace::cont(pid, None)
+                            } else {
+                                // in all other cases, we detach here because we can't know if this process will live
+                                // long enough for us to capture its exit events
+                                procs.entry(pid).and_modify(|i| i.exited = true);
+                                ptrace::detach(pid, None)
+                            } {
+                                Ok(()) => {}
+                                // Intentionally ignore ESRCH errors here, because as per `man 2 ptrace`'s section
+                                // called "Death under ptrace" we cannot assume that the tracee exists at this point
+                                //
+                                // Reasons why ESRCH may be returned:
+                                //  1. tracee no longer exists
+                                //  2. tracee is not ptrace-stopped
+                                //  3. tracee is not traced by us
+                                //
+                                // In our case 2 and 3 should not be possible, so we should be able to safely ignore 1
+                                // In some cases the call to `get_rss` is slow enough, that by the time we sent another
+                                // ptrace request to the process - the process has already died - so explicitly ignore
+                                // the ESRCH error here.
+                                Err(e) if e == Errno::ESRCH => {
+                                    procs.entry(pid).and_modify(|i| i.exited = true);
+                                }
+                                Err(e) => bail!(e),
+                            }
+
+                            break;
+                        }
+                        WaitStatus::PtraceEvent(pid, _, value)
+                            if NEW_CHILD_EVENTS.contains(&value) =>
+                        {
                             // since we've set PTRACE_O_TRACE* options, all children will automatically
                             // be sent a SIGSTOP and will be made a tracee for us, so add them to our
                             // list of tracked pids and start handling them
-                            const NEW_CHILD_EVENTS: [i32; 3] = [
-                                Event::PTRACE_EVENT_FORK as i32,
-                                Event::PTRACE_EVENT_VFORK as i32,
-                                Event::PTRACE_EVENT_CLONE as i32,
-                            ];
+
                             if NEW_CHILD_EVENTS.contains(&value) {
                                 let new_pid = ptrace::getevent(pid)?;
                                 let new_pid = Pid::from_raw(new_pid as i32);
