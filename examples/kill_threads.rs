@@ -18,7 +18,7 @@ fn main() {
         children.push(child);
     }
 
-    sleep(Duration::from_secs(1));
+    sleep(Duration::from_millis(100));
 
     for mut child in children {
         child.kill().expect("failed to kill child");

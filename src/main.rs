@@ -171,10 +171,8 @@ fn main() -> Result<()> {
                         {
                             // this event fires early during process exit, so it's at this time we
                             // read the Rss value of the process just before it's gone
-                            match procs.get_mut(&pid) {
-                                Some(i) => i.rss = get_rss(pid)?,
-                                None => unreachable!("untracked pid"),
-                            }
+                            let info = procs.get_mut(&pid).expect("untracked pid");
+                            info.rss = get_rss(pid)?;
 
                             match if pid == child && args.return_result {
                                 // if we need to return the child's result, then we shouldn't detach from it since
@@ -183,7 +181,7 @@ fn main() -> Result<()> {
                             } else {
                                 // in all other cases, we detach here because we can't know if this process will live
                                 // long enough for us to capture its exit events
-                                procs.entry(pid).and_modify(|i| i.exited = true);
+                                info.exited = true;
                                 ptrace::detach(pid, None)
                             } {
                                 Ok(()) => {}
@@ -200,7 +198,7 @@ fn main() -> Result<()> {
                                 // ptrace request to the process - the process has already died - so explicitly ignore
                                 // the ESRCH error here.
                                 Err(e) if e == Errno::ESRCH => {
-                                    procs.entry(pid).and_modify(|i| i.exited = true);
+                                    info.exited = true;
                                 }
                                 Err(e) => bail!(e),
                             }
