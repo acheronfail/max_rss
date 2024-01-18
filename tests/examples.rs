@@ -10,16 +10,22 @@ fn cmd(bin: &str, args: &[&str]) {
         .stderr(Stdio::null())
         .stdout(Stdio::null())
         .status()
-        .expect("failed to build example")
+        .expect(&format!("failed to run command: {} {:?}", bin, args))
         .success());
 }
 
 fn run(example_name: &str) -> Value {
-    let bin = format!("./target/debug/examples/{}", example_name);
+    let bin = format!(
+        "./target/{}/examples/{}",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        example_name
+    );
+
     let out = format!("{}.json", example_name);
-
-    cmd("cargo", &["build", "--example", example_name]);
-
     match fs::remove_file(&out) {
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
