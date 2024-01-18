@@ -4,14 +4,15 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-fn cmd(bin: &str, args: &[&str]) {
-    assert!(Command::new(bin)
+fn cmd(bin: &str, args: &[&str]) -> String {
+    let output = Command::new(bin)
         .args(args)
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdout(Stdio::null())
-        .status()
-        .expect(&format!("failed to run command: {} {:?}", bin, args))
-        .success());
+        .output()
+        .expect(&format!("failed to run command: {} {:?}", bin, args));
+
+    String::from_utf8_lossy(&output.stderr).to_string()
 }
 
 fn run(example_name: &str) -> Value {
@@ -32,11 +33,23 @@ fn run(example_name: &str) -> Value {
         Err(e) => panic!("{}", e),
     }
 
-    cmd("cargo", &["run", "--", "--output", &out, &bin]);
+    let stderr = cmd(
+        "cargo",
+        &[
+            "run",
+            "--",
+            "--return-result",
+            "--debug",
+            "--output",
+            &out,
+            &bin,
+        ],
+    );
 
     let text = fs::read_to_string(&out).expect("failed to read output");
     let json = serde_json::from_str::<Value>(&text).expect("failed to parse JSON");
 
+    eprintln!("{}", stderr);
     dbg!(json)
 }
 
@@ -92,8 +105,8 @@ fn tracee_exit_0() {
 
 #[test]
 fn tracee_exit_1() {
-    let json = run("true");
-    assert_eq!(json["exit_code"], 0);
+    let json = run("false");
+    assert_eq!(json["exit_code"], 1);
     assert_eq!(json["total_pids"], 1);
     assert_eq!(json["total_reads"], 1);
 }
